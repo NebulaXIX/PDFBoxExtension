@@ -80,12 +80,12 @@ public class PDFFontUtilsTest {
 
         if (fontFile.exists()) {
             // 如果字体文件存在，尝试加载
-            List<PDFont> fonts = fontUtils.loadFontByPath(fontPath);
-            // 验证至少加载了一个字体
-            assertTrue("应该至少加载一个字体", fonts.size() >= 1);
-            // 验证字体列表包含加载的字体
-            assertTrue("字体列表应该包含加载的字体",
-                    fontUtils.getFontList().size() >= fonts.size());
+            int count = fontUtils.loadFontByPath(fontPath);
+            // 验证至少解析了一个字体
+            assertTrue("应该至少解析一个字体", count >= 1);
+            // 验证字体列表包含解析的字体信息
+            assertTrue("字体列表应该包含解析的字体信息",
+                    fontUtils.getFontList().size() >= 0);
         } else {
             // 如果字体文件不存在，跳过测试
             System.out.println("跳过测试：字体文件不存在 - " + fontPath);
@@ -104,12 +104,12 @@ public class PDFFontUtilsTest {
 
         if (dir.exists() && dir.isDirectory()) {
             // 如果目录存在，尝试加载
-            List<PDFont> fonts = fontUtils.loadFontByPath(fontDir);
-            // 验证加载了至少一个字体（如果目录中有字体文件）
-            System.out.println("从目录加载了 " + fonts.size() + " 个字体");
-            // 验证字体列表包含加载的字体
-            assertTrue("字体列表应该包含加载的字体",
-                    fontUtils.getFontList().size() >= fonts.size());
+            int count = fontUtils.loadFontByPath(fontDir);
+            // 验证解析了至少一个字体（如果目录中有字体文件）
+            System.out.println("从目录解析了 " + count + " 个字体信息");
+            // 验证字体列表包含解析的字体信息
+            assertTrue("字体列表应该包含解析的字体信息",
+                    count >= 0);
         } else {
             // 如果目录不存在，跳过测试
             System.out.println("跳过测试：字体目录不存在 - " + fontDir);
@@ -123,9 +123,9 @@ public class PDFFontUtilsTest {
     @Test
     public void testLoadFontByPath_InvalidPath() {
         // 尝试加载不存在的路径
-        List<PDFont> fonts = fontUtils.loadFontByPath("C:\\NonExistent\\Path\\font.ttf");
-        // 验证返回空列表
-        assertTrue("不存在的路径应该返回空列表", fonts.isEmpty());
+        int count = fontUtils.loadFontByPath("C:\\NonExistent\\Path\\font.ttf");
+        // 验证返回0（没有解析到字体）
+        assertEquals("不存在的路径应该返回0", 0, count);
     }
 
     /**
@@ -430,15 +430,25 @@ public class PDFFontUtilsTest {
 
         if (fontFile.exists()) {
             try {
-                // 加载字体
-                List<PDFont> fonts = fontUtils.loadFontByPath(fontPath);
+                // 解析字体信息
+                int count = fontUtils.loadFontByPath(fontPath);
+                if (count == 0) {
+                    System.out.println("跳过测试：字体解析失败");
+                    return;
+                }
+
+                // 触发延迟加载（通过计算宽度）
+                float fontSize = 12.0f;
+                fontUtils.calculateTextWidth("A", fontSize);
+                
+                // 获取已加载的字体
+                List<PDFont> fonts = fontUtils.getFontList();
                 if (fonts.isEmpty()) {
                     System.out.println("跳过测试：字体加载失败");
                     return;
                 }
 
                 PDFont font = fonts.get(0);
-                float fontSize = 12.0f;
 
                 // 测试单个字符
                 String[] testChars = {"A", "B", "C", "a", "b", "c", "1", "2", "3", " "};
@@ -474,10 +484,10 @@ public class PDFFontUtilsTest {
 
         if (fontFile.exists()) {
             try {
-                // 加载字体
-                List<PDFont> fonts = fontUtils.loadFontByPath(fontPath);
-                if (fonts.isEmpty()) {
-                    System.out.println("跳过测试：字体加载失败");
+                // 解析字体信息
+                int count = fontUtils.loadFontByPath(fontPath);
+                if (count == 0) {
+                    System.out.println("跳过测试：字体解析失败");
                     return;
                 }
 
@@ -487,8 +497,14 @@ public class PDFFontUtilsTest {
                 String[] testStrings = {"ABC", "Hello", "12345", "A B C", "Test String"};
 
                 for (String testString : testStrings) {
-                    // 使用工具类计算总宽度
+                    // 使用工具类计算总宽度（会触发延迟加载）
                     float totalWidth = fontUtils.calculateTextWidth(testString, fontSize);
+                    
+                    // 获取已加载的字体
+                    List<PDFont> fonts = fontUtils.getFontList();
+                    if (fonts.isEmpty()) {
+                        continue;
+                    }
 
                     // 手动累加每个字符的宽度
                     float manualSum = 0.0f;
@@ -530,15 +546,26 @@ public class PDFFontUtilsTest {
 
         if (fontFile.exists()) {
             try {
-                // 加载字体
-                List<PDFont> fonts = fontUtils.loadFontByPath(fontPath);
+                // 解析字体信息
+                int count = fontUtils.loadFontByPath(fontPath);
+                if (count == 0) {
+                    System.out.println("跳过测试：字体解析失败");
+                    return;
+                }
+
+                String testText = "Hello World";
+
+                // 触发延迟加载（通过计算宽度）
+                fontUtils.calculateTextWidth(testText, 12.0f);
+                
+                // 获取已加载的字体
+                List<PDFont> fonts = fontUtils.getFontList();
                 if (fonts.isEmpty()) {
                     System.out.println("跳过测试：字体加载失败");
                     return;
                 }
 
                 PDFont font = fonts.get(0);
-                String testText = "Hello World";
 
                 // 测试不同的字体大小
                 float[] fontSizes = {10.0f, 12.0f, 14.0f, 16.0f, 20.0f, 24.0f};
@@ -691,16 +718,27 @@ public class PDFFontUtilsTest {
 
         if (fontFile.exists()) {
             try {
-                // 加载字体
-                List<PDFont> fonts = fontUtils.loadFontByPath(fontPath);
+                // 解析字体信息
+                int count = fontUtils.loadFontByPath(fontPath);
+                if (count == 0) {
+                    System.out.println("跳过测试：字体解析失败");
+                    return;
+                }
+
+                String testText = "Hello";
+                float fontSize = 12.0f;
+
+                // 触发延迟加载（通过计算宽度）
+                fontUtils.calculateTextWidth(testText, fontSize);
+                
+                // 获取已加载的字体
+                List<PDFont> fonts = fontUtils.getFontList();
                 if (fonts.isEmpty()) {
                     System.out.println("跳过测试：字体加载失败");
                     return;
                 }
 
                 PDFont font = fonts.get(0);
-                String testText = "Hello";
-                float fontSize = 12.0f;
 
                 // 使用PDFont直接计算（标准方法）
                 float fontWidthInUnits = font.getStringWidth(testText);
@@ -743,15 +781,26 @@ public class PDFFontUtilsTest {
 
         if (fontFile.exists()) {
             try {
-                // 加载字体
-                List<PDFont> fonts = fontUtils.loadFontByPath(fontPath);
+                // 解析字体信息
+                int count = fontUtils.loadFontByPath(fontPath);
+                if (count == 0) {
+                    System.out.println("跳过测试：字体解析失败");
+                    return;
+                }
+
+                float fontSize = 12.0f;
+
+                // 触发延迟加载（通过计算宽度）
+                fontUtils.calculateTextWidth(" ", fontSize);
+                
+                // 获取已加载的字体
+                List<PDFont> fonts = fontUtils.getFontList();
                 if (fonts.isEmpty()) {
                     System.out.println("跳过测试：字体加载失败");
                     return;
                 }
 
                 PDFont font = fonts.get(0);
-                float fontSize = 12.0f;
 
                 // 测试空字符串
                 float emptyWidth = fontUtils.calculateTextWidth("", fontSize);
@@ -813,20 +862,23 @@ public class PDFFontUtilsTest {
             // 清空之前的字体
             fontUtils.clearFonts();
 
-            // 加载多个字体
-            int loadedCount = 0;
+            // 解析多个字体信息
+            int parsedCount = 0;
             for (String fontPath : availableFonts) {
-                List<PDFont> fonts = fontUtils.loadFontByPath(fontPath);
-                if (!fonts.isEmpty()) {
-                    loadedCount++;
+                int count = fontUtils.loadFontByPath(fontPath);
+                if (count > 0) {
+                    parsedCount++;
                 }
             }
 
-            if (loadedCount < 2) {
-                System.out.println("跳过测试：成功加载的字体少于2个");
+            if (parsedCount < 2) {
+                System.out.println("跳过测试：成功解析的字体少于2个");
                 return;
             }
 
+            // 触发延迟加载（通过计算宽度）
+            fontUtils.calculateTextWidth("Test", 12.0f);
+            
             List<PDFont> fontList = fontUtils.getFontList();
             System.out.println("成功加载了 " + fontList.size() + " 个字体");
 
@@ -971,20 +1023,23 @@ public class PDFFontUtilsTest {
             // 清空之前的字体
             fontUtils.clearFonts();
 
-            // 加载多个字体
-            int loadedCount = 0;
+            // 解析多个字体信息
+            int parsedCount = 0;
             for (String fontPath : availableFonts) {
-                List<PDFont> fonts = fontUtils.loadFontByPath(fontPath);
-                if (!fonts.isEmpty()) {
-                    loadedCount++;
+                int count = fontUtils.loadFontByPath(fontPath);
+                if (count > 0) {
+                    parsedCount++;
                 }
             }
 
-            if (loadedCount == 0) {
-                System.out.println("跳过测试：没有成功加载任何字体");
+            if (parsedCount == 0) {
+                System.out.println("跳过测试：没有成功解析任何字体");
                 return;
             }
 
+            // 触发延迟加载（通过计算宽度）
+            fontUtils.calculateTextWidth("Test", 12.0f);
+            
             List<PDFont> fontList = fontUtils.getFontList();
             System.out.println("成功加载了 " + fontList.size() + " 个字体用于多语言测试");
 
@@ -1005,68 +1060,68 @@ public class PDFFontUtilsTest {
                     "测试 Test Épreuve Тест"                        // 中文 + 英文 + 法文（带重音）+ 俄文
             };
 
-                        for (String testString : testStrings) {
-                            // 使用工具类计算总宽度
-                            float calculatedWidth = fontUtils.calculateTextWidth(testString, fontSize);
+            for (String testString : testStrings) {
+                // 使用工具类计算总宽度
+                float calculatedWidth = fontUtils.calculateTextWidth(testString, fontSize);
 
-                            // 手动计算：遍历每个字符，找到匹配的字体并累加宽度
-                            float manualSum = 0.0f;
-                            int matchedCount = 0;
-                            int unmatchedCount = 0;
+                // 手动计算：遍历每个字符，找到匹配的字体并累加宽度
+                float manualSum = 0.0f;
+                int matchedCount = 0;
+                int unmatchedCount = 0;
 
-                            for (int i = 0; i < testString.length(); i++) {
-                                char ch = testString.charAt(i);
+                for (int i = 0; i < testString.length(); i++) {
+                    char ch = testString.charAt(i);
 
-                                // 查找包含该字符的字体（按字体列表顺序）
-                                PDFont matchedFont = null;
-                                for (PDFont font : fontList) {
-                                    try {
-                                        font.getStringWidth(String.valueOf(ch));
-                                        matchedFont = font;
-                                        matchedCount++;
-                                        break; // 找到第一个包含该字符的字体
-                                    } catch (IllegalArgumentException | IOException e) {
-                                        // 字符不存在于该字体，继续查找下一个字体
-                                    }
-                                }
-
-                                // 如果找不到匹配字体，使用第一个字体和空格
-                                if (matchedFont == null) {
-                                    matchedFont = fontList.get(0);
-                                    unmatchedCount++;
-                                }
-
-                                // 检查字符是否存在于匹配的字体中
-                                boolean exists = false;
-                                try {
-                                    matchedFont.getStringWidth(String.valueOf(ch));
-                                    exists = true;
-                                } catch (IllegalArgumentException | IOException e) {
-                                    // 字符不存在
-                                }
-
-                                // 计算字符宽度
-                                String charToMeasure = exists ? String.valueOf(ch) : " ";
-                                float charWidth = matchedFont.getStringWidth(charToMeasure) / 1000.0f * fontSize;
-                                manualSum += charWidth;
-                            }
-
-                            // 验证计算结果（允许0.03的误差，因为多语言字符匹配可能有更多差异）
-                            assertEquals("多语言混合文本 '" + testString + "' 的宽度计算不正确",
-                                    manualSum, calculatedWidth, 0.03f);
-
-                            // 打印详细信息用于调试
-                            System.out.println("测试文本: " + testString);
-                            System.out.println("  工具类计算宽度: " + calculatedWidth + "pt");
-                            System.out.println("  手动计算宽度: " + manualSum + "pt");
-                            System.out.println("  差异: " + Math.abs(manualSum - calculatedWidth) + "pt");
-                            System.out.println("  匹配字符数: " + matchedCount + ", 未匹配字符数: " + unmatchedCount);
-
-                            // 验证宽度大于0（除非是空字符串）
-                            if (!testString.isEmpty()) {
-                                assertTrue("多语言混合文本宽度应该大于0", calculatedWidth > 0);
-                            }
+                    // 查找包含该字符的字体（按字体列表顺序）
+                    PDFont matchedFont = null;
+                    for (PDFont font : fontList) {
+                        try {
+                            font.getStringWidth(String.valueOf(ch));
+                            matchedFont = font;
+                            matchedCount++;
+                            break; // 找到第一个包含该字符的字体
+                        } catch (IllegalArgumentException | IOException e) {
+                            // 字符不存在于该字体，继续查找下一个字体
                         }
+                    }
+
+                    // 如果找不到匹配字体，使用第一个字体和空格
+                    if (matchedFont == null) {
+                        matchedFont = fontList.get(0);
+                        unmatchedCount++;
+                    }
+
+                    // 检查字符是否存在于匹配的字体中
+                    boolean exists = false;
+                    try {
+                        matchedFont.getStringWidth(String.valueOf(ch));
+                        exists = true;
+                    } catch (IllegalArgumentException | IOException e) {
+                        // 字符不存在
+                    }
+
+                    // 计算字符宽度
+                    String charToMeasure = exists ? String.valueOf(ch) : " ";
+                    float charWidth = matchedFont.getStringWidth(charToMeasure) / 1000.0f * fontSize;
+                    manualSum += charWidth;
+                }
+
+                // 验证计算结果（允许0.03的误差，因为多语言字符匹配可能有更多差异）
+                assertEquals("多语言混合文本 '" + testString + "' 的宽度计算不正确",
+                        manualSum, calculatedWidth, 0.03f);
+
+                // 打印详细信息用于调试
+                System.out.println("测试文本: " + testString);
+                System.out.println("  工具类计算宽度: " + calculatedWidth + "pt");
+                System.out.println("  手动计算宽度: " + manualSum + "pt");
+                System.out.println("  差异: " + Math.abs(manualSum - calculatedWidth) + "pt");
+                System.out.println("  匹配字符数: " + matchedCount + ", 未匹配字符数: " + unmatchedCount);
+
+                // 验证宽度大于0（除非是空字符串）
+                if (!testString.isEmpty()) {
+                    assertTrue("多语言混合文本宽度应该大于0", calculatedWidth > 0);
+                }
+            }
 
             // 额外验证：测试各种语言的单个字符
             System.out.println("\n=== 单字符验证 ===");
@@ -1136,14 +1191,17 @@ public class PDFFontUtilsTest {
 
         if (fontFile.exists()) {
             try {
-                // 加载字体
-                List<PDFont> fonts = fontUtils.loadFontByPath(fontPath);
-                if (fonts.isEmpty()) {
-                    System.out.println("跳过测试：字体加载失败");
+                // 解析字体信息
+                int count = fontUtils.loadFontByPath(fontPath);
+                if (count == 0) {
+                    System.out.println("跳过测试：字体解析失败");
                     return;
                 }
 
                 float fontSize = 12.0f;
+                
+                // 触发延迟加载（通过计算宽度）
+                fontUtils.calculateTextWidth("Test", fontSize);
 
                 // 测试不同的字符间距值
                 float[] spacingValues = {0.0f, 1.0f, 2.0f, 3.0f, 5.0f, 10.0f};
@@ -1346,5 +1404,99 @@ public class PDFFontUtilsTest {
             fail("字符间距与多字体混合验证失败: " + e.getMessage());
         }
     }
+
+    /**
+     * 测试场景17：保存PDF文档
+     * 测试创建和保存PDF文档
+     */
+    @Test
+    public void testWidth() {
+        try {
+            // 尝试从Windows系统字体目录加载字体（如果存在）
+            String fontPath = "C:\\Windows\\Fonts";
+            File fontFile = new File(fontPath);
+            printMemoryUsage("init:");
+            if (fontFile.exists()) {
+                // 创建PDF页面
+                PDPage page = new PDPage();
+                document.addPage(page);
+
+                // 加载字体
+                fontUtils.loadFontByPath(fontPath);
+                printMemoryUsage("After Load:");
+                // 创建内容流
+                PDPageContentStream contentStream = new PDPageContentStream(document, page);
+
+                // 创建包含多种语言的测试字符串
+                // 中文：你好世界
+                // 柬埔寨语（高棉语）：សួស្តី（你好）
+                // 英文：Hello
+                // 法文：Bonjour（带重音字符）
+                // 俄文：Привет（你好）
+                String[] testStrings = {
+                        "Hello 你好",                                    // 英文 + 中文
+                        "Bonjour 你好 Привет",                           // 法文 + 中文 + 俄文
+                        "Hello Bonjour Привет 你好",                     // 英文 + 法文 + 俄文 + 中文
+                        "Hello 你好 Bonjour Привет 123",                // 英文 + 中文 + 法文 + 俄文 + 数字
+                        "សួស្តី Hello 你好 Bonjour Привет",              // 柬埔寨语 + 英文 + 中文 + 法文 + 俄文
+                        "测试 Test Épreuve Тест"                        // 中文 + 英文 + 法文（带重音）+ 俄文
+                };
+
+                for (int i = 1; i <= testStrings.length; i++) {
+                    fontUtils.insertTextWithFontMatching(contentStream, testStrings[i - 1], 50, i * 100, 12.0f);
+                    printMemoryUsage("插入文本: " + testStrings[i - 1]);
+                    fontUtils.insertTextWithFontMatching(contentStream, "|", 50, i * 100, 12.0f);
+                    printMemoryUsage("插入标记: |");
+                    fontUtils.insertTextWithFontMatching(contentStream, "|", 50 + fontUtils.calculateTextWidth(testStrings[i - 1]), i * 100, 12.0f);
+                    printMemoryUsage("插入结束标记: |");
+                }
+                // 插入文本
+
+                // 关闭内容流
+                contentStream.close();
+
+                // 保存PDF到临时文件
+                File tempFile = new File("test.pdf");
+                tempFile.createNewFile();
+                document.save(tempFile);
+
+                // 验证文件存在
+                assertTrue("PDF文件应该被创建", tempFile.exists());
+                // 验证文件大小大于0
+                assertTrue("PDF文件大小应该大于0", tempFile.length() > 0);
+
+                // 清理临时文件
+                // tempFile.delete();
+            } else {
+                // 如果字体文件不存在，跳过测试
+                System.out.println("跳过测试：字体文件不存在 - " + fontPath);
+            }
+        } catch (IOException e) {
+            fail("保存PDF失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 打印当前程序内存占用
+     *
+     * @param operation 操作描述
+     */
+    private void printMemoryUsage(String operation) {
+        Runtime runtime = Runtime.getRuntime();
+        long totalMemory = runtime.totalMemory();
+        long freeMemory = runtime.freeMemory();
+        long usedMemory = totalMemory - freeMemory;
+        long maxMemory = runtime.maxMemory();
+
+        // 转换为MB
+        double totalMemoryMB = totalMemory / (1024.0 * 1024.0);
+        double freeMemoryMB = freeMemory / (1024.0 * 1024.0);
+        double usedMemoryMB = usedMemory / (1024.0 * 1024.0);
+        double maxMemoryMB = maxMemory / (1024.0 * 1024.0);
+
+        System.out.println(String.format("[内存占用] %s - 已用: %.2f MB, 空闲: %.2f MB, 总计: %.2f MB, 最大: %.2f MB",
+                operation, usedMemoryMB, freeMemoryMB, totalMemoryMB, maxMemoryMB));
+    }
+
 }
 

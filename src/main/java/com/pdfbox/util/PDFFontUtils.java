@@ -7,9 +7,14 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
+import org.apache.fontbox.ttf.NamingTable;
+import org.apache.fontbox.ttf.TTFParser;
 import org.apache.fontbox.ttf.TrueTypeCollection;
 import org.apache.fontbox.ttf.TrueTypeFont;
 import org.apache.pdfbox.pdmodel.PDDocument;
@@ -27,12 +32,66 @@ import org.apache.pdfbox.pdmodel.font.PDType0Font;
 public class PDFFontUtils {
     
     /**
-     * 字体列表，按优先级排序
+     * 静态初始化块：配置日志级别以抑制FontBox的警告信息
      */
-    private List<PDFont> fontList;
+    static {
+        try {
+            // 抑制 FontBox TTFParser 的警告日志
+            Logger fontBoxLogger = Logger.getLogger("org.apache.fontbox.ttf.TTFParser");
+            fontBoxLogger.setLevel(Level.SEVERE);
+            // 禁用所有处理器，避免输出警告
+            fontBoxLogger.setUseParentHandlers(false);
+            
+            // 同时抑制父级 logger 的警告
+            Logger fontBoxParentLogger = Logger.getLogger("org.apache.fontbox");
+            fontBoxParentLogger.setLevel(Level.SEVERE);
+            fontBoxParentLogger.setUseParentHandlers(false);
+            
+            // 抑制所有 FontBox 相关的 logger
+            Logger fontBoxRootLogger = Logger.getLogger("org.apache.fontbox.ttf");
+            fontBoxRootLogger.setLevel(Level.SEVERE);
+            fontBoxRootLogger.setUseParentHandlers(false);
+        } catch (Exception e) {
+            // 如果配置日志失败，忽略异常，不影响正常功能
+        }
+    }
     
     /**
-     * 字体名称到PDFont的映射，用于缓存已加载的字体
+     * 字体信息内部类
+     * 存储字体文件路径和TTC索引（如果是TTC文件）
+     */
+    private static class FontInfo {
+        /**
+         * 字体文件路径
+         */
+        String filePath;
+        
+        /**
+         * TTC文件中的字体索引，如果不是TTC文件则为-1
+         */
+        int ttcIndex;
+        
+        /**
+         * 构造函数
+         * 
+         * @param filePath 字体文件路径
+         * @param ttcIndex TTC索引，如果不是TTC文件则为-1
+         */
+        FontInfo(String filePath, int ttcIndex) {
+            this.filePath = filePath;
+            this.ttcIndex = ttcIndex;
+        }
+    }
+    
+    /**
+     * 字体列表，按优先级排序
+     * key: 字体的cosname
+     * value: 字体信息（文件路径和TTC索引）
+     */
+    private LinkedHashMap<String, FontInfo> fontList;
+    
+    /**
+     * 字体名称（cosname）到PDFont的映射，用于缓存已加载的字体
      */
     private Map<String, PDFont> fontCache;
     
@@ -60,8 +119,8 @@ public class PDFFontUtils {
      * @param defaultFontSize 默认字体大小
      */
     public PDFFontUtils(PDDocument document, float defaultFontSize) {
-        // 初始化字体列表
-        this.fontList = new ArrayList<>();
+        // 初始化字体列表（使用LinkedHashMap保持顺序）
+        this.fontList = new LinkedHashMap<>();
         // 初始化字体缓存
         this.fontCache = new HashMap<>();
         // 设置PDF文档对象
@@ -82,16 +141,71 @@ public class PDFFontUtils {
     }
     
     /**
-     * 根据路径懒加载字体文件或路径下的所有字体
-     * 如果路径是文件，则加载该字体文件
-     * 如果路径是目录，则加载目录下所有支持的字体文件（.ttf, .otf, .ttc）
+     * 从TrueTypeFont获取字体的cosname
+     * 
+     * @param ttf TrueTypeFont对象
+     * @return 字体的cosname，如果获取失败返回null
+     */
+    private String getFontCosname(TrueTypeFont ttf) {
+        try {
+            NamingTable namingTable = ttf.getNaming();
+            if (namingTable != null) {
+                // 获取PostScript名称（通常用作cosname）
+                String psName = namingTable.getPostScriptName();
+                if (psName != null && !psName.isEmpty()) {
+                    return psName;
+                }
+                // 如果没有PostScript名称，尝试使用字体族名称
+                String familyName = namingTable.getFontFamily();
+                if (familyName != null && !familyName.isEmpty()) {
+                    return familyName;
+                }
+            }
+        } catch (Exception e) {
+            // 获取失败，返回null
+        }
+        return null;
+    }
+    
+    /**
+     * 从字体文件获取cosname（仅用于TTF/OTF文件）
+     * 
+     * @param fontFile 字体文件
+     * @return 字体的cosname，如果获取失败返回null
+     */
+    private String getFontCosnameFromFile(File fontFile) {
+        // 临时设置日志级别以抑制警告
+        Logger fontBoxLogger = Logger.getLogger("org.apache.fontbox.ttf.TTFParser");
+        Level originalLevel = fontBoxLogger.getLevel();
+        try {
+            // 设置日志级别为 SEVERE，只显示严重错误
+            fontBoxLogger.setLevel(Level.SEVERE);
+            fontBoxLogger.setUseParentHandlers(false);
+            
+            TrueTypeFont ttf = new TTFParser().parse(fontFile);
+            return getFontCosname(ttf);
+        } catch (Exception e) {
+            // 获取失败，返回null
+            return null;
+        } finally {
+            // 恢复原始日志级别
+            if (originalLevel != null) {
+                fontBoxLogger.setLevel(originalLevel);
+            }
+            fontBoxLogger.setUseParentHandlers(true);
+        }
+    }
+    
+    /**
+     * 根据路径解析字体文件或路径下的所有字体信息（不实际加载字体）
+     * 如果路径是文件，则解析该字体文件
+     * 如果路径是目录，则解析目录下所有支持的字体文件（.ttf, .otf, .ttc）
      * 
      * @param fontPath 字体文件路径或目录路径
-     * @return 加载成功的字体列表
+     * @return 解析成功的字体数量
      */
-    public List<PDFont> loadFontByPath(String fontPath) {
-        // 存储加载成功的字体列表
-        List<PDFont> loadedFonts = new ArrayList<>();
+    public int loadFontByPath(String fontPath) {
+        int count = 0;
         
         try {
             // 将字符串路径转换为Path对象
@@ -100,25 +214,22 @@ public class PDFFontUtils {
             // 检查路径是否存在
             if (!Files.exists(path)) {
                 System.err.println("路径不存在: " + fontPath);
-                return loadedFonts;
+                return count;
             }
             
             // 判断是文件还是目录
             if (Files.isRegularFile(path)) {
-                // 如果是文件，直接加载该字体文件
+                // 如果是文件，直接解析该字体文件
                 File fontFile = path.toFile();
                 String fileName = fontFile.getName().toLowerCase();
                 
-                // 如果是TTC文件，需要加载所有字体
+                // 如果是TTC文件，需要解析所有字体
                 if (fileName.endsWith(".ttc")) {
-                    // TTC文件包含多个字体，加载所有字体
-                    List<PDFont> ttcFonts = loadTTCFileAll(fontFile);
-                    loadedFonts.addAll(ttcFonts);
+                    count += parseTTCFileInfo(fontFile);
                 } else {
-                    // TTF或OTF文件，加载单个字体
-                    PDFont font = loadFontFile(fontFile);
-                    if (font != null) {
-                        loadedFonts.add(font);
+                    // TTF或OTF文件，解析单个字体
+                    if (parseFontFileInfo(fontFile)) {
+                        count++;
                     }
                 }
             } else if (Files.isDirectory(path)) {
@@ -134,15 +245,13 @@ public class PDFFontUtils {
                         if (fileName.endsWith(".ttf") || 
                             fileName.endsWith(".otf") || 
                             fileName.endsWith(".ttc")) {
-                            // 如果是TTC文件，加载所有字体
+                            // 如果是TTC文件，解析所有字体
                             if (fileName.endsWith(".ttc")) {
-                                List<PDFont> ttcFonts = loadTTCFileAll(file);
-                                loadedFonts.addAll(ttcFonts);
+                                count += parseTTCFileInfo(file);
                             } else {
-                                // TTF或OTF文件，加载单个字体
-                                PDFont font = loadFontFile(file);
-                                if (font != null) {
-                                    loadedFonts.add(font);
+                                // TTF或OTF文件，解析单个字体
+                                if (parseFontFileInfo(file)) {
+                                    count++;
                                 }
                             }
                         }
@@ -150,75 +259,175 @@ public class PDFFontUtils {
                 }
             }
         } catch (Exception e) {
-            // 加载失败时打印错误信息
-            System.err.println("从路径加载字体失败: " + fontPath + ", 错误: " + e.getMessage());
+            // 解析失败时打印错误信息
+            System.err.println("从路径解析字体失败: " + fontPath + ", 错误: " + e.getMessage());
         }
         
-        return loadedFonts;
+        return count;
     }
     
     /**
-     * 加载单个字体文件
-     * 支持TTF、OTF和TTC格式
+     * 解析字体文件信息（不实际加载字体）
      * 
      * @param fontFile 字体文件
-     * @return 加载的PDFont对象，如果加载失败返回null（TTC文件返回第一个字体）
+     * @return 如果解析成功返回true，否则返回false
      */
-    private PDFont loadFontFile(File fontFile) {
+    private boolean parseFontFileInfo(File fontFile) {
         try {
-            // 检查缓存中是否已存在该字体
-            String fontKey = fontFile.getAbsolutePath();
-            if (fontCache.containsKey(fontKey)) {
-                PDFont cachedFont = fontCache.get(fontKey);
-                // 如果字体列表中不包含该字体，则添加到列表
-                if (!fontList.contains(cachedFont)) {
-                    fontList.add(cachedFont);
+            String cosname = getFontCosnameFromFile(fontFile);
+            if (cosname != null && !cosname.isEmpty()) {
+                // 如果字体列表中已存在该cosname，跳过
+                if (!fontList.containsKey(cosname)) {
+                    fontList.put(cosname, new FontInfo(fontFile.getAbsolutePath(), -1));
+                    return true;
                 }
-                return cachedFont;
+            } else {
+                // 如果无法获取cosname，使用文件路径作为key
+                String fallbackKey = fontFile.getAbsolutePath();
+                if (!fontList.containsKey(fallbackKey)) {
+                    fontList.put(fallbackKey, new FontInfo(fontFile.getAbsolutePath(), -1));
+                    return true;
+                }
             }
+        } catch (Exception e) {
+            System.err.println("解析字体文件信息失败: " + fontFile.getAbsolutePath() + ", 错误: " + e.getMessage());
+        }
+        return false;
+    }
+    
+    /**
+     * 解析TTC文件信息，获取所有字体的cosname（不实际加载字体）
+     * 
+     * @param ttcFile TTC字体文件
+     * @return 解析成功的字体数量
+     */
+    private int parseTTCFileInfo(File ttcFile) {
+        int count = 0;
+        TrueTypeCollection ttc = null;
+        
+        // 临时设置日志级别以抑制警告
+        Logger fontBoxLogger = Logger.getLogger("org.apache.fontbox");
+        Level originalLevel = fontBoxLogger.getLevel();
+        try {
+            // 设置日志级别为 SEVERE，只显示严重错误
+            fontBoxLogger.setLevel(Level.SEVERE);
+            fontBoxLogger.setUseParentHandlers(false);
             
-            // 检查文件扩展名，判断是否为TTC文件
-            String fileName = fontFile.getName().toLowerCase();
+            // 使用TrueTypeCollection来解析TTC文件
+            ttc = new TrueTypeCollection(ttcFile);
+            final int[] index = {0}; // 使用数组来在lambda中修改值
+            
+            // 使用processAllFonts方法遍历TTC文件中的每一个字体
+            ttc.processAllFonts((TrueTypeFont ttf) -> {
+                try {
+                    String cosname = getFontCosname(ttf);
+                    String filePath = ttcFile.getAbsolutePath();
+                    int currentIndex = index[0];
+                    
+                    if (cosname != null && !cosname.isEmpty()) {
+                        // 如果字体列表中已存在该cosname，跳过
+                        if (!fontList.containsKey(cosname)) {
+                            fontList.put(cosname, new FontInfo(filePath, currentIndex));
+                        }
+                    } else {
+                        // 如果无法获取cosname，使用文件路径+索引作为key
+                        String fallbackKey = filePath + "#" + currentIndex;
+                        if (!fontList.containsKey(fallbackKey)) {
+                            fontList.put(fallbackKey, new FontInfo(filePath, currentIndex));
+                        }
+                    }
+                    index[0]++;
+                } catch (Exception e) {
+                    // 某个字体解析失败，打印错误信息但继续处理其他字体
+                    System.err.println("解析TTC文件中的字体失败: " + e.getMessage());
+                }
+            });
+            
+            count = index[0];
+            
+            if (count > 0) {
+                System.out.println("从TTC文件解析了 " + count + " 个字体信息: " + ttcFile.getName());
+            } else {
+                System.err.println("TTC文件中没有成功解析任何字体: " + ttcFile.getAbsolutePath());
+            }
+        } catch (IOException e) {
+            // 解析失败时打印错误信息
+            System.err.println("解析TTC文件失败: " + ttcFile.getAbsolutePath() + ", 错误: " + e.getMessage());
+        } finally {
+            // 恢复原始日志级别
+            if (originalLevel != null) {
+                fontBoxLogger.setLevel(originalLevel);
+            }
+            fontBoxLogger.setUseParentHandlers(true);
+            
+            // 关闭TrueTypeCollection资源
+            if (ttc != null) {
+                try {
+                    ttc.close();
+                } catch (IOException e) {
+                    System.err.println("关闭TTC文件失败: " + e.getMessage());
+                }
+            }
+        }
+        
+        return count;
+    }
+    
+    /**
+     * 根据cosname延迟加载字体
+     * 如果fontCache中已存在，直接返回；否则根据FontInfo加载字体
+     * 
+     * @param cosname 字体的cosname
+     * @return 加载的PDFont对象，如果加载失败返回null
+     */
+    private PDFont loadFontByCosname(String cosname) {
+        // 如果缓存中已存在，直接返回
+        if (fontCache.containsKey(cosname)) {
+            return fontCache.get(cosname);
+        }
+        
+        // 从fontList中获取FontInfo
+        FontInfo fontInfo = fontList.get(cosname);
+        if (fontInfo == null) {
+            return null;
+        }
+        
+        try {
+            File fontFile = new File(fontInfo.filePath);
             PDFont font;
             
-            if (fileName.endsWith(".ttc")) {
-                // TTC文件（TrueType Collection），包含多个字体
-                // 使用TrueTypeCollection来解析TTC文件
-                font = loadTTCFile(fontFile);
+            if (fontInfo.ttcIndex >= 0) {
+                // TTC文件，需要加载指定索引的字体
+                font = loadTTCFontByIndex(fontFile, fontInfo.ttcIndex);
             } else {
                 // TTF或OTF文件，直接加载
                 font = PDType0Font.load(document, fontFile);
             }
             
-            // 如果加载成功，添加到缓存和列表
+            // 如果加载成功，添加到缓存
             if (font != null) {
-                fontCache.put(fontKey, font);
-                // 如果字体列表中不包含该字体，则添加到列表
-                if (!fontList.contains(font)) {
-                    fontList.add(font);
-                }
+                fontCache.put(cosname, font);
             }
             
             return font;
         } catch (IOException e) {
             // 加载失败时打印错误信息
-            System.err.println("加载字体文件失败: " + fontFile.getAbsolutePath() + ", 错误: " + e.getMessage());
+            System.err.println("延迟加载字体失败: " + cosname + ", 文件: " + fontInfo.filePath + ", 错误: " + e.getMessage());
             return null;
         }
     }
     
     /**
-     * 加载TTC文件（TrueType Collection）
-     * TTC文件包含多个字体，此方法会遍历并加载TTC文件中的每一个字体
-     * 所有加载的字体都会被添加到字体列表中
+     * 从TTC文件中加载指定索引的字体
      * 
      * @param ttcFile TTC字体文件
-     * @return 加载的PDFont对象（第一个字体），如果加载失败返回null
+     * @param index 字体索引
+     * @return 加载的PDFont对象，如果加载失败返回null
      */
-    private PDFont loadTTCFile(File ttcFile) {
+    private PDFont loadTTCFontByIndex(File ttcFile, int index) {
         TrueTypeCollection ttc = null;
-        // 存储所有成功加载的字体
-        List<PDFont> loadedFonts = new ArrayList<>();
+        final PDFont[] result = {null}; // 使用数组来在lambda中修改值
+        final int[] currentIndex = {0}; // 使用数组来在lambda中修改值
         
         try {
             // 使用TrueTypeCollection来解析TTC文件
@@ -227,96 +436,23 @@ public class PDFFontUtils {
             // 使用processAllFonts方法遍历TTC文件中的每一个字体
             ttc.processAllFonts((TrueTypeFont ttf) -> {
                 try {
-                    // 将TrueTypeFont转换为PDFont
-                    // 使用PDType0Font.load的重载方法，传入TrueTypeFont和是否嵌入标志
-                    PDFont font = PDType0Font.load(document, ttf, true);
-                    
-                    if (font != null) {
-                        // 添加到成功加载的字体列表
-                        loadedFonts.add(font);
-                        
-                        // 添加到字体列表（如果列表中不包含该字体）
-                        if (!fontList.contains(font)) {
-                            fontList.add(font);
+                    // 如果当前索引匹配，加载该字体
+                    if (currentIndex[0] == index) {
+                        // 将TrueTypeFont转换为PDFont
+                        PDFont font = PDType0Font.load(document, ttf, true);
+                        if (font != null) {
+                            result[0] = font;
                         }
                     }
+                    currentIndex[0]++;
                 } catch (IOException | IllegalArgumentException e) {
-                    // 某个字体加载失败，打印错误信息但继续处理其他字体
-                    System.err.println("加载TTC文件中的字体失败: " + e.getMessage());
-                }
-            });
-            
-            // 检查是否有字体成功加载
-            if (loadedFonts.isEmpty()) {
-                System.err.println("TTC文件中没有成功加载任何字体: " + ttcFile.getAbsolutePath());
-                return null;
-            }
-            
-            // 打印加载信息
-            System.out.println("成功从TTC文件加载了 " + loadedFonts.size() + " 个字体: " + ttcFile.getName());
-            
-            // 返回第一个字体（保持向后兼容）
-            return loadedFonts.get(0);
-            
-        } catch (IOException e) {
-            // 加载失败时打印错误信息
-            System.err.println("加载TTC文件失败: " + ttcFile.getAbsolutePath() + ", 错误: " + e.getMessage());
-            return null;
-        } finally {
-            // 关闭TrueTypeCollection资源
-            if (ttc != null) {
-                try {
-                    ttc.close();
-                } catch (IOException e) {
-                    System.err.println("关闭TTC文件失败: " + e.getMessage());
-                }
-            }
-        }
-    }
-    
-    /**
-     * 从TTC文件中加载所有字体
-     * 使用processAllFonts方法遍历TTC文件中的每一个字体，不使用字体名称匹配
-     * 所有加载的字体都会被添加到字体列表中
-     * 
-     * @param ttcFile TTC字体文件
-     * @return 加载成功的字体列表
-     */
-    public List<PDFont> loadTTCFileAll(File ttcFile) {
-        List<PDFont> fonts = new ArrayList<>();
-        TrueTypeCollection ttc = null;
-        
-        try {
-            // 使用TrueTypeCollection来解析TTC文件
-            ttc = new TrueTypeCollection(ttcFile);
-            
-            // 使用processAllFonts方法遍历TTC文件中的每一个字体
-            ttc.processAllFonts((TrueTypeFont ttf) -> {
-                try {
-                    // 将TrueTypeFont转换为PDFont
-                    // 使用PDType0Font.load的重载方法，传入TrueTypeFont和是否嵌入标志
-                    PDFont font = PDType0Font.load(document, ttf, true);
-                    
-                    if (font != null) {
-                        // 添加到返回的字体列表
-                        fonts.add(font);
-                        
-                        // 添加到字体列表（如果列表中不包含该字体）
-                        if (!fontList.contains(font)) {
-                            fontList.add(font);
-                        }
+                    // 字体加载失败，打印错误信息但继续处理
+                    if (currentIndex[0] == index) {
+                        System.err.println("加载TTC文件中索引为 " + index + " 的字体失败: " + e.getMessage());
                     }
-                } catch (IOException | IllegalArgumentException e) {
-                    // 某个字体加载失败，打印错误信息但继续处理其他字体
-                    System.err.println("加载TTC文件中的字体失败: " + e.getMessage());
+                    currentIndex[0]++;
                 }
             });
-            
-            if (fonts.isEmpty()) {
-                System.err.println("TTC文件中没有成功加载任何字体: " + ttcFile.getAbsolutePath());
-            } else {
-                System.out.println("从TTC文件加载了 " + fonts.size() + " 个字体: " + ttcFile.getName());
-            }
         } catch (IOException e) {
             // 加载失败时打印错误信息
             System.err.println("加载TTC文件失败: " + ttcFile.getAbsolutePath() + ", 错误: " + e.getMessage());
@@ -331,7 +467,7 @@ public class PDFFontUtils {
             }
         }
         
-        return fonts;
+        return result[0];
     }
     
     /**
@@ -356,6 +492,7 @@ public class PDFFontUtils {
      * 为字符查找合适的字体
      * 按照字体列表顺序查找，找到第一个包含该字符的字体
      * 如果都不包含，返回第一个字体（用于替换为空格）
+     * 只有在fontCache中没有时才加载相关字体
      * 
      * @param character 要查找字体的字符
      * @return 合适的字体对象，如果字体列表为空返回null
@@ -366,8 +503,29 @@ public class PDFFontUtils {
             return null;
         }
         
-        // 遍历字体列表，查找包含该字符的字体
-        for (PDFont font : fontList) {
+        PDFont firstFont = null; // 保存第一个字体，用于fallback
+        
+        // 遍历字体列表（按顺序），查找包含该字符的字体
+        for (Map.Entry<String, FontInfo> entry : fontList.entrySet()) {
+            String cosname = entry.getKey();
+            
+            // 延迟加载字体：如果fontCache中没有，则加载
+            PDFont font = fontCache.get(cosname);
+            if (font == null) {
+                font = loadFontByCosname(cosname);
+            }
+            
+            // 如果字体加载失败，跳过
+            if (font == null) {
+                continue;
+            }
+            
+            // 保存第一个成功加载的字体
+            if (firstFont == null) {
+                firstFont = font;
+            }
+            
+            // 检查字符是否在该字体中存在
             if (isCharacterInFont(font, character)) {
                 // 找到包含该字符的字体，返回该字体
                 return font;
@@ -375,7 +533,7 @@ public class PDFFontUtils {
         }
         
         // 如果所有字体都不包含该字符，返回第一个字体（用于替换为空格）
-        return fontList.get(0);
+        return firstFont;
     }
     
     /**
@@ -552,12 +710,12 @@ public class PDFFontUtils {
     }
     
     /**
-     * 获取字体列表
+     * 获取已加载的字体列表
      * 
-     * @return 字体列表
+     * @return 已加载的字体列表（从fontCache中获取）
      */
     public List<PDFont> getFontList() {
-        return new ArrayList<>(fontList);
+        return new ArrayList<>(fontCache.values());
     }
     
     /**
@@ -604,5 +762,6 @@ public class PDFFontUtils {
     public float getCharacterSpacing() {
         return characterSpacing;
     }
+
 }
 
