@@ -3,6 +3,7 @@ package com.pdfbox.util;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.HashMap;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -12,7 +13,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-
 import org.apache.fontbox.ttf.NamingTable;
 import org.apache.fontbox.ttf.TTFParser;
 import org.apache.fontbox.ttf.TrueTypeCollection;
@@ -91,7 +91,13 @@ public class PDFFontUtils {
     private static LinkedHashMap<String, FontInfo> fontList = new LinkedHashMap<>();
 
     /**
-     * 字体名称（cosname）到PDFont的映射，用于缓存已加载的字体
+     * 当前 PDF 文档，由调用方在每一个 PDF 更换时通过 setCurrentDocument 设置。
+     * 加载字体、插入文本、计算宽度等均使用此 document，不再通过方法参数传入。
+     */
+    private static PDDocument currentDocument;
+
+    /**
+     * 当前 PDF 生成过程中已加载的字体缓存（cosname -> PDFont），切换 document 时清空，避免复用上一份 PDF 的字体。
      */
     private static Map<String, PDFont> fontCache = new HashMap<>();
 
@@ -113,7 +119,42 @@ public class PDFFontUtils {
     private PDFFontUtils() {
         // 静态工具类，不允许实例化
     }
-    
+
+    /**
+     * 设置当前 PDF 文档。每个 PDF 生成前调用一次；切换时清空 fontCache，避免复用上一份 PDF 的字体。
+     *
+     * @param document 当前要操作的 PDDocument，可为 null
+     */
+    public static void setCurrentDocument(PDDocument document) {
+        currentDocument = document;
+        fontCache.clear();
+    }
+
+    /**
+     * 获取当前 PDF 文档。
+     *
+     * @return 当前 document，可能为 null
+     */
+    public static PDDocument getCurrentDocument() {
+        return currentDocument;
+    }
+
+    /**
+     * 判断 TrueType 字体是否包含 Unicode cmap 表。
+     * 保存 PDF 时 PDFBox 会对字体做子集化，需要 cmap；无 cmap 的字体（如部分符号字体）会抛出 IOException。
+     *
+     * @param ttf TrueTypeFont 对象
+     * @return 若包含可用的 Unicode cmap 返回 true，否则 false
+     */
+    private static boolean hasUnicodeCmap(TrueTypeFont ttf) {
+        try {
+            ttf.getUnicodeCmapLookup();
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
     /**
      * 从TrueTypeFont获取字体的cosname
      * 
@@ -139,35 +180,6 @@ public class PDFFontUtils {
             // 获取失败，返回null
         }
         return null;
-    }
-    
-    /**
-     * 从字体文件获取cosname（仅用于TTF/OTF文件）
-     * 
-     * @param fontFile 字体文件
-     * @return 字体的cosname，如果获取失败返回null
-     */
-    private static String getFontCosnameFromFile(File fontFile) {
-        // 临时设置日志级别以抑制警告
-        Logger fontBoxLogger = Logger.getLogger("org.apache.fontbox.ttf.TTFParser");
-        Level originalLevel = fontBoxLogger.getLevel();
-        try {
-            // 设置日志级别为 SEVERE，只显示严重错误
-            fontBoxLogger.setLevel(Level.SEVERE);
-            fontBoxLogger.setUseParentHandlers(false);
-            
-            TrueTypeFont ttf = new TTFParser().parse(fontFile);
-            return getFontCosname(ttf);
-        } catch (Exception e) {
-            // 获取失败，返回null
-            return null;
-        } finally {
-            // 恢复原始日志级别
-            if (originalLevel != null) {
-                fontBoxLogger.setLevel(originalLevel);
-            }
-            fontBoxLogger.setUseParentHandlers(true);
-        }
     }
     
     /**
@@ -241,22 +253,29 @@ public class PDFFontUtils {
     }
     
     /**
-     * 解析字体文件信息（不实际加载字体）
-     * 
+     * 解析字体文件信息（不实际加载字体）。
+     * 仅当字体包含 Unicode cmap 表时才加入列表，避免保存时子集化报错。
+     *
      * @param fontFile 字体文件
-     * @return 如果解析成功返回true，否则返回false
+     * @return 如果解析成功且字体可用则返回 true，否则返回 false
      */
     private static boolean parseFontFileInfo(File fontFile) {
+        Logger fontBoxLogger = Logger.getLogger("org.apache.fontbox.ttf.TTFParser");
+        Level originalLevel = fontBoxLogger.getLevel();
         try {
-            String cosname = getFontCosnameFromFile(fontFile);
+            fontBoxLogger.setLevel(Level.SEVERE);
+            fontBoxLogger.setUseParentHandlers(false);
+            TrueTypeFont ttf = new TTFParser().parse(fontFile);
+            if (!hasUnicodeCmap(ttf)) {
+                return false;
+            }
+            String cosname = getFontCosname(ttf);
             if (cosname != null && !cosname.isEmpty()) {
-                // 如果字体列表中已存在该cosname，跳过
                 if (!fontList.containsKey(cosname)) {
                     fontList.put(cosname, new FontInfo(fontFile.getAbsolutePath(), -1));
                     return true;
                 }
             } else {
-                // 如果无法获取cosname，使用文件路径作为key
                 String fallbackKey = fontFile.getAbsolutePath();
                 if (!fontList.containsKey(fallbackKey)) {
                     fontList.put(fallbackKey, new FontInfo(fontFile.getAbsolutePath(), -1));
@@ -265,6 +284,10 @@ public class PDFFontUtils {
             }
         } catch (Exception e) {
             System.err.println("解析字体文件信息失败: " + fontFile.getAbsolutePath() + ", 错误: " + e.getMessage());
+        } finally {
+            if (originalLevel != null) {
+                fontBoxLogger.setLevel(originalLevel);
+            }
         }
         return false;
     }
@@ -291,33 +314,38 @@ public class PDFFontUtils {
             ttc = new TrueTypeCollection(ttcFile);
             final int[] index = {0}; // 使用数组来在lambda中修改值
             
+            final int[] addedCount = {0};
             // 使用processAllFonts方法遍历TTC文件中的每一个字体
             ttc.processAllFonts((TrueTypeFont ttf) -> {
                 try {
+                    if (!hasUnicodeCmap(ttf)) {
+                        index[0]++;
+                        return;
+                    }
                     String cosname = getFontCosname(ttf);
                     String filePath = ttcFile.getAbsolutePath();
                     int currentIndex = index[0];
-                    
+
                     if (cosname != null && !cosname.isEmpty()) {
-                        // 如果字体列表中已存在该cosname，跳过
                         if (!fontList.containsKey(cosname)) {
                             fontList.put(cosname, new FontInfo(filePath, currentIndex));
+                            addedCount[0]++;
                         }
                     } else {
-                        // 如果无法获取cosname，使用文件路径+索引作为key
                         String fallbackKey = filePath + "#" + currentIndex;
                         if (!fontList.containsKey(fallbackKey)) {
                             fontList.put(fallbackKey, new FontInfo(filePath, currentIndex));
+                            addedCount[0]++;
                         }
                     }
                     index[0]++;
                 } catch (Exception e) {
-                    // 某个字体解析失败，打印错误信息但继续处理其他字体
                     System.err.println("解析TTC文件中的字体失败: " + e.getMessage());
+                    index[0]++;
                 }
             });
-            
-            count = index[0];
+
+            count = addedCount[0];
             
             if (count > 0) {
                 System.out.println("从TTC文件解析了 " + count + " 个字体信息: " + ttcFile.getName());
@@ -348,61 +376,60 @@ public class PDFFontUtils {
     }
     
     /**
-     * 根据cosname延迟加载字体
-     * 如果fontCache中已存在，直接返回；否则根据FontInfo加载字体
-     * 
-     * @param cosname 字体的cosname
-     * @return 加载的PDFont对象，如果加载失败返回null
+     * 根据 cosname 加载字体，使用 currentDocument；单次 PDF 生成过程中已加载的字体放入 fontCache 复用。
+     *
+     * @param cosname 字体的 cosname
+     * @return 加载的 PDFont，失败或 currentDocument 为 null 时返回 null
      */
-    private static PDFont loadFontByCosname(PDDocument document, String cosname) {
-        // 如果缓存中已存在，直接返回
+    private static PDFont loadFontByCosname(String cosname) {
+        if (currentDocument == null) {
+            return null;
+        }
         if (fontCache.containsKey(cosname)) {
             return fontCache.get(cosname);
         }
-        
-        // 从fontList中获取FontInfo
         FontInfo fontInfo = fontList.get(cosname);
         if (fontInfo == null) {
             return null;
         }
-        
         try {
             File fontFile = new File(fontInfo.filePath);
             PDFont font;
-            
             if (fontInfo.ttcIndex >= 0) {
-                // TTC文件，需要加载指定索引的字体
-                font = loadTTCFontByIndex(document, fontFile, fontInfo.ttcIndex);
+                font = loadTTCFontByIndex(fontFile, fontInfo.ttcIndex);
             } else {
-                // TTF或OTF文件，直接加载
-                font = PDType0Font.load(document, fontFile);
+                try {
+                    TrueTypeFont ttf = new TTFParser().parse(fontFile);
+                    if (!hasUnicodeCmap(ttf)) {
+                        font = null;
+                    } else {
+                        font = PDType0Font.load(currentDocument, fontFile);
+                    }
+                } catch (IOException e) {
+                    font = null;
+                }
             }
-            
-            // 如果加载成功，添加到缓存
             if (font != null) {
                 fontCache.put(cosname, font);
             }
-            
             return font;
-        } catch (IOException e) {
-            // 加载失败时打印错误信息
+        } catch (Exception e) {
             System.err.println("延迟加载字体失败: " + cosname + ", 文件: " + fontInfo.filePath + ", 错误: " + e.getMessage());
             return null;
         }
     }
     
     /**
-     * 从TTC文件中加载指定索引的字体
-     * 
+     * 从TTC文件中加载指定索引的字体，使用 currentDocument。
+     *
      * @param ttcFile TTC字体文件
      * @param index 字体索引
      * @return 加载的PDFont对象，如果加载失败返回null
      */
-    private static PDFont loadTTCFontByIndex(PDDocument document, File ttcFile, int index) {
+    private static PDFont loadTTCFontByIndex(File ttcFile, int index) {
         TrueTypeCollection ttc = null;
         final PDFont[] result = {null}; // 使用数组来在lambda中修改值
         final int[] currentIndex = {0}; // 使用数组来在lambda中修改值
-        
         try {
             // 使用TrueTypeCollection来解析TTC文件
             ttc = new TrueTypeCollection(ttcFile);
@@ -410,10 +437,13 @@ public class PDFFontUtils {
             // 使用processAllFonts方法遍历TTC文件中的每一个字体
             ttc.processAllFonts((TrueTypeFont ttf) -> {
                 try {
-                    // 如果当前索引匹配，加载该字体
                     if (currentIndex[0] == index) {
-                        // 将TrueTypeFont转换为PDFont
-                        PDFont font = PDType0Font.load(document, ttf, true);
+                        // 加载前再次确认含 Unicode cmap，避免 save 时子集化报错
+                        if (!hasUnicodeCmap(ttf)) {
+                            currentIndex[0]++;
+                            return;
+                        }
+                        PDFont font = PDType0Font.load(currentDocument, ttf, true);
                         if (font != null) {
                             result[0] = font;
                         }
@@ -431,8 +461,8 @@ public class PDFFontUtils {
             // 加载失败时打印错误信息
             System.err.println("加载TTC文件失败: " + ttcFile.getAbsolutePath() + ", 错误: " + e.getMessage());
         } finally {
-            // 关闭TrueTypeCollection资源
-            if (ttc != null) {
+            // 仅当未成功加载字体时关闭 TTC；若已返回字体，PDType0Font 仍持有其底层流，关闭会导致 save 时 subset 出现 raf 为 null 的 NPE
+            if (ttc != null && result[0] == null) {
                 try {
                     ttc.close();
                 } catch (IOException e) {
@@ -466,46 +496,37 @@ public class PDFFontUtils {
      * 为字符查找合适的字体
      * 按照字体列表顺序查找，找到第一个包含该字符的字体
      * 如果都不包含，返回第一个字体（用于替换为空格）
-     * 只有在fontCache中没有时才加载相关字体
+     * 按 fontList 顺序加载字体（不缓存）
      * 
      * @param character 要查找字体的字符
      * @return 合适的字体对象，如果字体列表为空返回null
      */
-    private static PDFont findFontForCharacter(PDDocument document, char character) {
-        // 如果字体列表为空，返回null
+    private static PDFont findFontForCharacter(char character) {
         if (fontList.isEmpty()) {
             return null;
         }
-        
-        PDFont firstFont = null; // 保存第一个字体，用于fallback
-        
-        // 遍历字体列表（按顺序），查找包含该字符的字体
+        PDFont firstFont = null;
         for (Map.Entry<String, FontInfo> entry : fontList.entrySet()) {
             String cosname = entry.getKey();
-            
-            // 延迟加载字体：如果fontCache中没有，则加载
-            PDFont font = fontCache.get(cosname);
-            if (font == null) {
-                font = loadFontByCosname(document, cosname);
-            }
-            
+            PDFont font = loadFontByCosname(cosname);
+
             // 如果字体加载失败，跳过
             if (font == null) {
                 continue;
             }
-            
+
             // 保存第一个成功加载的字体
             if (firstFont == null) {
                 firstFont = font;
             }
-            
+
             // 检查字符是否在该字体中存在
             if (isCharacterInFont(font, character)) {
                 // 找到包含该字符的字体，返回该字体
                 return font;
             }
         }
-        
+
         // 如果所有字体都不包含该字符，返回第一个字体（用于替换为空格）
         return firstFont;
     }
@@ -520,32 +541,17 @@ public class PDFFontUtils {
      * @param preferredFontCosName 首选字体的COSName，可以为null
      * @return 合适的字体对象，如果字体列表为空返回null
      */
-    private static PDFont findFontForCharacterWithPreference(PDDocument document, char character, String preferredFontCosName) {
-        // 如果字体列表为空，返回null
+    private static PDFont findFontForCharacterWithPreference(char character, String preferredFontCosName) {
         if (fontList.isEmpty()) {
             return null;
         }
-
-        // 如果preferredFontCosName不为null，尝试加载对应的字体
         if (preferredFontCosName != null) {
-            PDFont preferredFont;
-
-            // 先从缓存中查找
-            if (fontCache.containsKey(preferredFontCosName)) {
-                preferredFont = fontCache.get(preferredFontCosName);
-            } else {
-                // 如果缓存中没有，尝试加载
-                preferredFont = loadFontByCosname(document, preferredFontCosName);
-            }
-
-            // 如果成功加载了字体，检查字符是否在该字体中存在
+            PDFont preferredFont = loadFontByCosname(preferredFontCosName);
             if (preferredFont != null && isCharacterInFont(preferredFont, character)) {
                 return preferredFont;
             }
         }
-
-        // 如果首选字体不存在或字符不在首选字体中，按照原有逻辑查找
-        return findFontForCharacter(document, character);
+        return findFontForCharacter(character);
     }
     
     /**
@@ -567,8 +573,7 @@ public class PDFFontUtils {
      * @param fontSize 字体大小，单位：点（point, pt）
      * @throws IOException IO异常
      */
-    public static void insertTextWithFontMatching(PDDocument document,
-                                           PDPageContentStream contentStream,
+    public static void insertTextWithFontMatching(PDPageContentStream contentStream,
                                            String text,
                                            float x,
                                            float y,
@@ -586,7 +591,7 @@ public class PDFFontUtils {
             char character = text.charAt(i);
             
             // 查找适合该字符的字体
-            PDFont font = findFontForCharacter(document, character);
+            PDFont font = findFontForCharacter(character);
             
             // 如果找不到字体，跳过该字符
             if (font == null) {
@@ -633,13 +638,11 @@ public class PDFFontUtils {
      * @param y 起始Y坐标
      * @throws IOException IO异常
      */
-    public static void insertTextWithFontMatching(PDDocument document,
-                                           PDPageContentStream contentStream,
+    public static void insertTextWithFontMatching(PDPageContentStream contentStream,
                                            String text,
                                            float x,
                                            float y) throws IOException {
-        // 调用带字体大小参数的方法，使用默认字体大小
-        insertTextWithFontMatching(document, contentStream, text, x, y, defaultFontSize);
+        insertTextWithFontMatching(contentStream, text, x, y, defaultFontSize);
     }
 
     /**
@@ -662,8 +665,7 @@ public class PDFFontUtils {
      * @param preferredFontCosName 首选字体的COSName，如果为null则使用原有逻辑
      * @throws IOException IO异常
      */
-    public static void insertTextWithPreferredFont(PDDocument document,
-                                           PDPageContentStream contentStream,
+    public static void insertTextWithPreferredFont(PDPageContentStream contentStream,
                                            String text,
                                            float x,
                                            float y,
@@ -682,7 +684,7 @@ public class PDFFontUtils {
             char character = text.charAt(i);
 
             // 查找适合该字符的字体
-            PDFont font = findFontForCharacterWithPreference(document, character, preferredFontCosName);
+            PDFont font = findFontForCharacterWithPreference(character, preferredFontCosName);
 
             // 如果找不到字体，跳过该字符
             if (font == null) {
@@ -730,14 +732,12 @@ public class PDFFontUtils {
      * @param preferredFontCosName 首选字体的COSName，如果为null则使用原有逻辑
      * @throws IOException IO异常
      */
-    public static void insertTextWithPreferredFont(PDDocument document,
-                                           PDPageContentStream contentStream,
+    public static void insertTextWithPreferredFont(PDPageContentStream contentStream,
                                            String text,
                                            float x,
                                            float y,
                                            String preferredFontCosName) throws IOException {
-        // 调用带字体大小参数的方法，使用默认字体大小
-        insertTextWithPreferredFont(document, contentStream, text, x, y, defaultFontSize, preferredFontCosName);
+        insertTextWithPreferredFont(contentStream, text, x, y, defaultFontSize, preferredFontCosName);
     }
     
     /**
@@ -760,90 +760,41 @@ public class PDFFontUtils {
     }
 
     /**
-     * 根据给定字符串在指定字体下计算出该字符串在PDF中的长度
-     * 如果指定字体存在，则优先使用该字体
-     * 如果字符在指定字体中不存在，则按照字体列表顺序尝试其他字体
-     * 下一个字符仍然先尝试指定字体
-     * 考虑字符间距（character spacing）的影响
+     * 根据给定字符串在指定字体下计算出该字符串在PDF中的长度，使用 currentDocument。
      *
-     * 单位说明：
-     * - 字体内部单位：PDFont.getStringWidth() 返回的是字体单位（font units），通常为1000单位制
-     * - 转换公式：字符宽度(点) = font.getStringWidth(字符) / 1000 * fontSize(点)
-     * - 最终返回单位：点（point, pt），1点 = 1/72英寸 ≈ 0.3528毫米
-     * - 字符间距单位：点（point, pt）
-     *
-     * @param text 要计算的文本
-     * @param fontSize 字体大小，单位：点（point, pt）
-     * @param fontName 首选字体的COSName，如果为null则使用原有逻辑
-     * @return 文本在PDF中的总宽度，单位：点（point, pt），包括字符间距
+     * @param text      要计算的文本
+     * @param fontSize  字体大小，单位：点（point, pt）
+     * @param fontName  首选字体的COSName，如果为null则使用原有逻辑
+     * @return 文本在PDF中的总宽度，单位：点（point, pt），包括字符间距；currentDocument 为 null 时返回 0
      */
     public static float calculateTextWidth(String text, float fontSize, String fontName) {
-        // 如果字体列表为空，返回0
-        if (fontList.isEmpty()) {
+        if (fontList.isEmpty() || currentDocument == null) {
             return 0.0f;
         }
-
-        // 创建临时document用于字体加载（计算宽度不需要保存document）
-        PDDocument tempDocument = new PDDocument();
-
-        try {
-            // 总宽度
-            float totalWidth = 0.0f;
-
-            // 有效字符计数（用于计算字符间距）
-            int validCharCount = 0;
-
-            // 遍历文本中的每个字符
-            for (int i = 0; i < text.length(); i++) {
-                char character = text.charAt(i);
-
-                // 查找适合该字符的字体
-                PDFont font = findFontForCharacterWithPreference(tempDocument, character, fontName);
-            
-            // 如果找不到字体，跳过该字符
+        float totalWidth = 0.0f;
+        int validCharCount = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char character = text.charAt(i);
+            PDFont font = findFontForCharacterWithPreference(character, fontName);
             if (font == null) {
                 continue;
             }
-            
-            // 检查字符是否在所有字体中都不存在
             boolean characterExists = isCharacterInFont(font, character);
-            
-            // 如果字符不存在，使用空格替代
             String charToMeasure = characterExists ? String.valueOf(character) : " ";
-            
             try {
-                // 计算字符宽度（字体单位转换为点单位）
-                // font.getStringWidth() 返回字体单位（1000单位制）
-                // 转换为点单位：字符宽度(点) = 字体单位 / 1000 * 字体大小(点)
                 float charWidth = font.getStringWidth(charToMeasure) / 1000.0f * fontSize;
-                // 累加到总宽度（单位：点）
                 totalWidth += charWidth;
-                // 增加有效字符计数
                 validCharCount++;
             } catch (IOException e) {
-                // IO异常时，字符宽度为0，不计入有效字符
                 System.err.println("计算字符宽度失败: " + character + ", 错误: " + e.getMessage());
             }
         }
-        
-        // 添加字符间距：如果有n个有效字符，则有(n-1)个字符间距
-        // 字符间距在每两个字符之间添加额外空间（单位：点）
         if (validCharCount > 1 && characterSpacing > 0) {
             totalWidth += characterSpacing * (validCharCount - 1);
         }
-        
-            // 返回总宽度，单位：点（point, pt）
-            return totalWidth;
-        } finally {
-            // 关闭临时document
-            try {
-                tempDocument.close();
-            } catch (IOException e) {
-                // 忽略关闭异常
-            }
-        }
+        return totalWidth;
     }
-    
+
     /**
      * 使用默认字体大小计算文本宽度
      * 
@@ -856,16 +807,27 @@ public class PDFFontUtils {
     }
     
     /**
-     * 获取已加载的字体列表
-     * 
-     * @return 已加载的字体列表（从fontCache中获取）
+     * 获取字体列表（cosname 列表，来自 fontList，不缓存已加载的 PDFont）
+     *
+     * @return 已注册的字体 cosname 列表
      */
-    public static List<PDFont> getFontList() {
-        return new ArrayList<>(fontCache.values());
+    public static List<String> getFontList() {
+        return new ArrayList<>(fontList.keySet());
     }
-    
+
     /**
-     * 清空字体列表和缓存
+     * 为 currentDocument 预加载至少一种字体（仅触发加载，不缓存）。
+     */
+    public static void ensureAtLeastOneFontLoaded() {
+        if (currentDocument == null || fontList.isEmpty()) {
+            return;
+        }
+        String firstCosname = fontList.keySet().iterator().next();
+        loadFontByCosname(firstCosname);
+    }
+
+    /**
+     * 清空字体列表与当前 PDF 的字体缓存。
      */
     public static void clearFonts() {
         fontList.clear();
